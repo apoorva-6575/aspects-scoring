@@ -26,8 +26,13 @@ with st.sidebar:
     patient_path = st.text_input("Patient NCCT path (.nii.gz)")
     atlas_dir = st.text_input("Atlas directory", value="data/atlas")
     age_group = st.selectbox("Atlas age group", ["10_29", "30_49", "50_69", "70_89"], index=2)
-    percentile = st.slider("Detection sensitivity (percentile)", 80, 99, 90)
-    min_blob = st.slider("Min blob size (voxels)", 1, 100, 15)
+    percentile = st.slider("Detection sensitivity (percentile)", 50, 99, 70)
+    min_blob = st.slider("Min blob size (voxels)", 1, 150, 80)
+    erode_iterations = st.slider(
+        "Skull-strip boundary erosion (voxels)", 0, 8, 3,
+        help="Shrinks the brain mask before detection to exclude the skull-strip "
+             "boundary rim, which otherwise dominates the threshold with edge noise.",
+    )
     already_windowed = st.checkbox(
         "Pre-windowed source (e.g. AISD-derived volume)",
         help="Check this for volumes from scripts/convert_aisd_to_nifti.py -- "
@@ -49,7 +54,8 @@ if run and patient_path and atlas_dir:
         pre = preprocess_volume(patient_path, already_windowed=already_windowed)
     with st.spinner("Detecting ischemic change..."):
         diff_map, change_mask = detect_ischemic_change(
-            pre["windowed"], pre["brain_mask"], percentile=percentile, min_blob_voxels=min_blob
+            pre["windowed"], pre["brain_mask"], percentile=percentile,
+            min_blob_voxels=min_blob, erode_iterations=erode_iterations,
         )
     with st.spinner("Registering ASPECTS atlas..."):
         reg = register_aspects_atlas(pre["windowed"], pre["brain_mask"],

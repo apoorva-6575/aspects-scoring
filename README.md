@@ -116,14 +116,28 @@ streamlit run app/streamlit_app.py
 - `src/detection.py`: `mirror_across_x` assumes the volume is already
   roughly axis-aligned. If your dataset has tilted scans, rotate using
   `lr_axis` from `preprocessing.find_midline_axis` first.
-- Threshold/percentile values (`detection.py`, `scoring.py`) are untuned —
-  on a real test case the detection mask was scattered broadly across
-  most of the brain (not localized), giving zero overlap with the
-  compact, anatomically-plausible registered regions. Calibrate the
-  detection threshold against AISD's `mask_binary.nii.gz` (Dice score) to
-  make it more localized before scoring will produce meaningful flags.
-  There's no ground truth for the final ASPECTS score itself, only for
-  the lesion mask.
+- **Detection has been calibrated** (`scripts/tune_detection.py`, grid
+  search over 60 AISD patients, results in `src/detection.py`'s
+  docstring): `erode_iterations=3, percentile=70, min_blob_voxels=80`,
+  mean Dice **0.073** against AISD's `mask_binary.nii.gz`. Two real bugs
+  were found and fixed along the way: (1) `mirror_across_x` was mirroring
+  around the image's geometric center instead of the brain's actual
+  centroid, which differ by up to ~70px on AISD volumes — now auto-derived
+  from `brain_mask`; (2) `threshold_mask` had an O(voxels × blobs) loop
+  that made it ~7s/call, now vectorized to ~0.1s. Be honest about what
+  0.073 Dice means: this is a genuinely hard detection problem on NCCT
+  (the problem statement itself says the signal can be "only a few
+  Hounsfield units"), and this is the best result found with a purely
+  classical symmetry-difference method, not a solved detector. If there's
+  time left, the highest-leverage next steps are: real anatomical
+  landmark-based skull stripping (HD-BET) instead of the crude HU
+  threshold, and/or restricting the difference map to a plausible
+  parenchyma intensity band to exclude CSF/ventricle noise. There's still
+  no ground truth for the final ASPECTS score itself, only for the lesion
+  mask — the score has to be validated qualitatively.
+- Re-run `scripts/tune_detection.py --n-patients <more>` if there's time
+  to calibrate on a larger sample; 60 was chosen for speed, not because
+  it's definitively enough.
 - Registration confidence threshold in `scoring.py` is unset — run a few
   known-good vs. known-bad registrations to calibrate it, then use it to
   gate the "uncertain" flag.

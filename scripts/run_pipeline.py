@@ -26,8 +26,9 @@ def main():
                              "SGL_label_<age>.nii.gz (see README download step)")
     parser.add_argument("--age-group", default="50_69",
                         choices=["10_29", "30_49", "50_69", "70_89"])
-    parser.add_argument("--percentile", type=float, default=90)
-    parser.add_argument("--min-blob-voxels", type=int, default=15)
+    parser.add_argument("--percentile", type=float, default=70)
+    parser.add_argument("--min-blob-voxels", type=int, default=80)
+    parser.add_argument("--erode-iterations", type=int, default=3)
     parser.add_argument("--already-windowed", action="store_true",
                         help="Set this for AISD-derived volumes (see "
                              "scripts/convert_aisd_to_nifti.py) -- their pixels are "
@@ -47,6 +48,7 @@ def main():
     diff_map, change_mask = detect_ischemic_change(
         pre["windowed"], pre["brain_mask"],
         percentile=args.percentile, min_blob_voxels=args.min_blob_voxels,
+        erode_iterations=args.erode_iterations,
     )
     print(f"  flagged voxels (whole volume): {change_mask.sum()}")
 

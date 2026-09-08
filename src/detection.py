@@ -9,16 +9,35 @@ import numpy as np
 from scipy import ndimage
 
 
-def mirror_across_x(volume, center_x=None):
+def brain_center_x(brain_mask):
+    """x-centroid of the brain mask -- a much better mirror axis than the
+    image's geometric center. On AISD-derived volumes these differ by up
+    to ~70px since the head isn't centered in the 512x512 canvas; mirroring
+    around the wrong axis silently produces a garbage difference map with
+    near-zero overlap with any real lesion (measured: Dice ~0.008 vs
+    ~0.015+ after this fix, see scripts/tune_detection.py).
+    """
+    return np.argwhere(brain_mask)[:, 0].mean()
+
+
+def mirror_across_x(volume, center_x=None, brain_mask=None):
     """Mirror a volume left-right across a given x index.
 
     Assumes the volume is already roughly axis-aligned (x = left-right),
     which holds for most clinical NCCT after standard loading. If scans in
     your dataset are tilted, rotate to align `lr_axis` from preprocessing
     with the x-axis before calling this.
+
+    If `center_x` isn't given, it's derived from `brain_mask` (see
+    `brain_center_x`) rather than defaulting to the image's geometric
+    center -- pass `brain_mask` explicitly, don't rely on the old
+    geometric-center fallback.
     """
     if center_x is None:
-        center_x = (volume.shape[0] - 1) / 2.0
+        if brain_mask is None:
+            center_x = (volume.shape[0] - 1) / 2.0
+        else:
+            center_x = brain_center_x(brain_mask)
     flipped = volume[::-1, :, :]
     shift = 2 * center_x - (volume.shape[0] - 1)
     mirrored = ndimage.shift(flipped, shift=(shift, 0, 0), order=1, mode="nearest")
@@ -55,9 +74,24 @@ def threshold_mask(diff_map, brain_mask, percentile=90, min_blob_voxels=15):
 
 
 def detect_ischemic_change(volume, brain_mask, center_x=None,
-                            percentile=90, min_blob_voxels=15):
-    """Full Phase 2 pipeline: returns (diff_map, change_mask)."""
-    mirrored = mirror_across_x(volume, center_x)
-    diff = difference_map(volume, mirrored, brain_mask)
-    mask = threshold_mask(diff, brain_mask, percentile, min_blob_voxels)
+                            percentile=70, min_blob_voxels=80, erode_iterations=3):
+    """Full Phase 2 pipeline: returns (diff_map, change_mask).
+
+    Defaults (erode_iterations=3, percentile=70, min_blob_voxels=80) were
+    picked by scripts/tune_detection.py, grid-searched against AISD ground
+    truth over 60 patients (mean Dice 0.073 -- see README: this is a
+    genuinely hard detection problem on NCCT per the problem statement
+    itself, and this is the best classical-method result found, not a
+    solved detector; min_blob_voxels barely moved the score once erosion
+    and percentile were right). `erode_iterations` shrinks the brain mask
+    before diffing/thresholding to exclude the skull-strip boundary rim,
+    which otherwise dominates the percentile threshold with asymmetric
+    edge noise unrelated to any real lesion -- this alone roughly doubled
+    Dice in testing.
+    """
+    eroded_mask = (ndimage.binary_erosion(brain_mask, iterations=erode_iterations)
+                   if erode_iterations > 0 else brain_mask)
+    mirrored = mirror_across_x(volume, center_x, brain_mask=brain_mask)
+    diff = difference_map(volume, mirrored, eroded_mask)
+    mask = threshold_mask(diff, eroded_mask, percentile, min_blob_voxels)
     return diff, mask
