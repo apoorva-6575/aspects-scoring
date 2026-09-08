@@ -30,11 +30,16 @@ ASPECTS_REGIONS = {
 # be calibrated for the detection step, not the final score).
 DEFAULT_FLAG_FRACTION = 0.15
 
-# Below this registration metric quality, mark affected regions "uncertain"
-# instead of confidently flagging them. Sign/scale depends on the metric
-# used (Mattes MI cost is negative-is-better in SimpleITK) -- calibrate
-# this threshold empirically on a handful of known-good vs. known-bad cases.
-REGISTRATION_CONFIDENCE_THRESHOLD = None
+# Above this registration metric (Mattes MI cost -- negative is better in
+# SimpleITK), mark the slice's regions as low-confidence instead of
+# confidently flagging them. Picked by scripts/calibrate_registration_confidence.py
+# as the worst-quartile cutoff over 80 metric samples (40 patients x 2
+# ASPECTS slices): -0.0821. There's no ground-truth "good vs bad
+# registration" label in AISD to validate this against, so it's a
+# distribution-based default (flag the worst ~25% of registrations seen in
+# practice), not a validated accuracy guarantee -- recalibrate against real
+# ground truth if a manually-reviewed sample ever becomes available.
+REGISTRATION_CONFIDENCE_THRESHOLD = -0.0821
 
 
 def region_flags(change_mask, region_labels, flag_fraction=DEFAULT_FLAG_FRACTION):
@@ -82,6 +87,23 @@ def mark_uncertain_near_boundaries(flags, region_labels, change_mask, boundary_d
         boundary = region_mask ^ ndimage.binary_erosion(region_mask, iterations=boundary_dilation)
         if (boundary & change_mask).any() and info["coverage"] < DEFAULT_FLAG_FRACTION * 1.5:
             info["note"] = "change detected near region boundary -- verify manually"
+    return flags
+
+
+def mark_low_registration_confidence(flags, metric, threshold=REGISTRATION_CONFIDENCE_THRESHOLD):
+    """Mark every region in `flags` as low-confidence if this ASPECTS
+    slice's registration metric is worse than `threshold` (Mattes MI cost:
+    higher/less-negative = worse match). Call once per slice with that
+    slice's bg_metric/sc_metric (registration.register_aspects_atlas)
+    before merge_slice_flags -- a bad registration on one level shouldn't
+    be hidden by scoring output that looks just as confident as a good one.
+    """
+    if threshold is None or metric is None:
+        return flags
+    if metric > threshold:
+        for info in flags.values():
+            note = "low registration confidence for this slice"
+            info["note"] = f"{info['note']}; {note}" if info["note"] else note
     return flags
 
 

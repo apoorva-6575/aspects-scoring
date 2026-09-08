@@ -149,6 +149,15 @@ streamlit run app/streamlit_app.py
 - Re-run `scripts/tune_detection.py --n-patients <more>` if there's time
   to calibrate on a larger sample; 60 was chosen for speed, not because
   it's definitively enough.
-- Registration confidence threshold in `scoring.py` is unset — run a few
-  known-good vs. known-bad registrations to calibrate it, then use it to
-  gate the "uncertain" flag.
+- **Registration confidence threshold is now set**
+  (`REGISTRATION_CONFIDENCE_THRESHOLD = -0.0821` in `scoring.py`, via
+  `scripts/calibrate_registration_confidence.py`). There's no ground-truth
+  "good vs bad registration" label in AISD, so this isn't validated
+  against true accuracy — it's a distribution-based default: the worst
+  quartile of registration metrics seen across 40 calibration patients (80
+  BG+SC samples) gets marked low-confidence via
+  `mark_low_registration_confidence`, wired into both
+  `scripts/run_pipeline.py` and the Streamlit app. Recalibrate against
+  real ground truth if a manually-reviewed sample of known-good/bad
+  registrations ever becomes available — that would be a meaningfully
+  better threshold than a distribution percentile.

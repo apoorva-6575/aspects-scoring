@@ -15,7 +15,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.preprocessing import preprocess_volume
 from src.detection import detect_ischemic_change
 from src.registration import register_aspects_atlas
-from src.scoring import region_flags, mark_uncertain_near_boundaries, merge_slice_flags, compute_aspects_score
+from src.scoring import (
+    region_flags, mark_uncertain_near_boundaries, mark_low_registration_confidence,
+    merge_slice_flags, compute_aspects_score,
+)
 from src.visualize import render_slice
 
 st.set_page_config(page_title="ASPECTS Auto-Scoring", layout="wide")
@@ -66,8 +69,10 @@ if run and patient_path and atlas_dir:
 
         bg_flags = region_flags(bg_change_2d, reg["bg_region_labels"])
         bg_flags = mark_uncertain_near_boundaries(bg_flags, reg["bg_region_labels"], bg_change_2d)
+        bg_flags = mark_low_registration_confidence(bg_flags, reg["bg_metric"])
         sc_flags = region_flags(sc_change_2d, reg["sc_region_labels"])
         sc_flags = mark_uncertain_near_boundaries(sc_flags, reg["sc_region_labels"], sc_change_2d)
+        sc_flags = mark_low_registration_confidence(sc_flags, reg["sc_metric"])
 
         flags = merge_slice_flags(bg_flags, sc_flags)
         score, flagged_count = compute_aspects_score(flags)
@@ -116,7 +121,9 @@ else:
     with col2:
         st.metric("ASPECTS score", f"{result['score']}/10")
         st.caption(f"{result['flagged_count']} region(s) flagged")
-        st.caption("Registration metric is a rough confidence proxy — calibrate against known cases.")
+        st.caption("A slice with the worst-quartile registration metric (seen across 40 "
+                   "calibration patients) is marked low-confidence below — a distribution-based "
+                   "default, not validated accuracy.")
         st.subheader("Per-region breakdown")
         for region_id, info in result["flags"].items():
             label = f"{region_id}. {info['name']}"
