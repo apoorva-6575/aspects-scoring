@@ -4,14 +4,18 @@ regions) into per-region flags and the final ASPECTS score.
 
 import numpy as np
 
-# TODO: fill in with the actual label values from the atlas you download --
-# these are placeholders. Left/right pairs share the same label id in most
-# NCCT ASPECTS atlases; hemisphere is inferred from x-position instead.
+# Confirmed against the ASPECTS-281 atlas (figshare.com/articles/figure/
+# ASPECTS-281/26819290) and its source paper (PMC11480093): C=1, L=2, IC=3,
+# I=4, M1-M6=5-10. BGL_label_*.nii.gz contains labels 1-7 (one 2D slice at
+# basal-ganglia level); SGL_label_*.nii.gz contains labels 8-10 (a separate
+# 2D slice at supraganglionic level) -- see registration.py notes on the 2D
+# two-slice atlas structure. Left/right hemisphere is inferred from
+# x-position, not a separate label id.
 ASPECTS_REGIONS = {
     1: "Caudate",
     2: "Lentiform nucleus",
-    3: "Insula",
-    4: "Internal capsule",
+    3: "Internal capsule",
+    4: "Insula",
     5: "M1",
     6: "M2",
     7: "M3",
@@ -37,9 +41,13 @@ def region_flags(change_mask, region_labels, flag_fraction=DEFAULT_FLAG_FRACTION
     """For each ASPECTS region id, compute the fraction of the region
     covered by the change mask and whether it's flagged.
 
-    `region_labels` must be a label volume already in the same array shape
-    and voxel grid as `change_mask` (i.e. warped atlas resampled onto the
-    patient image, from registration.warp_atlas_labels).
+    Works on 2D slices or 3D volumes -- shape-agnostic. In this pipeline
+    it's called once per ASPECTS slice (BG level, SC level), since each
+    slice's warped region_labels only contains the region ids that atlas
+    level covers (regions absent from a slice come back as "region not
+    found in warp"); merge_slice_flags combines the two calls into one
+    10-region result. `region_labels` must be the same shape/grid as
+    `change_mask` (i.e. warped atlas output from registration.warp_2d_labels).
     """
     results = {}
     for region_id, name in ASPECTS_REGIONS.items():
@@ -75,6 +83,25 @@ def mark_uncertain_near_boundaries(flags, region_labels, change_mask, boundary_d
         if (boundary & change_mask).any() and info["coverage"] < DEFAULT_FLAG_FRACTION * 1.5:
             info["note"] = "change detected near region boundary -- verify manually"
     return flags
+
+
+def merge_slice_flags(bg_flags, sc_flags):
+    """Combine region_flags() results from the BG-level and SC-level
+    slices into one 10-region dict. Each region id is only real in one of
+    the two slices (1-7 in BG, 8-10 in SC) -- prefer whichever result
+    actually found the region, falling back to the other if neither did.
+    """
+    merged = {}
+    for region_id in ASPECTS_REGIONS:
+        bg_info = bg_flags.get(region_id)
+        sc_info = sc_flags.get(region_id)
+        for info in (bg_info, sc_info):
+            if info is not None and info["note"] != "region not found in warp":
+                merged[region_id] = info
+                break
+        else:
+            merged[region_id] = bg_info or sc_info
+    return merged
 
 
 def compute_aspects_score(flags):

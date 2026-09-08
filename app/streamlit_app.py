@@ -1,5 +1,6 @@
-"""Phase 5: demo UI. Upload/select an NCCT volume, browse slices, see the
-detected-change overlay, region boundaries, and the ASPECTS score.
+"""Phase 5: demo UI. Pick an NCCT volume, see the two ASPECTS-relevant
+slices (basal ganglia level, supraganglionic level) with the detected
+change overlay and region boundaries, plus the final score.
 
 Run with: streamlit run app/streamlit_app.py
 """
@@ -13,8 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.preprocessing import preprocess_volume
 from src.detection import detect_ischemic_change
-from src.registration import register_atlas_to_patient, warp_atlas_labels
-from src.scoring import region_flags, mark_uncertain_near_boundaries, compute_aspects_score
+from src.registration import register_aspects_atlas
+from src.scoring import region_flags, mark_uncertain_near_boundaries, merge_slice_flags, compute_aspects_score
 from src.visualize import render_slice
 
 st.set_page_config(page_title="ASPECTS Auto-Scoring", layout="wide")
@@ -23,8 +24,8 @@ st.title("Automated ASPECTS Scoring")
 with st.sidebar:
     st.header("Inputs")
     patient_path = st.text_input("Patient NCCT path (.nii.gz)")
-    atlas_path = st.text_input("Atlas NCCT path (.nii.gz)")
-    atlas_labels_path = st.text_input("Atlas region-labels path (.nii.gz)")
+    atlas_dir = st.text_input("Atlas directory", value="data/atlas")
+    age_group = st.selectbox("Atlas age group", ["10_29", "30_49", "50_69", "70_89"], index=2)
     percentile = st.slider("Detection sensitivity (percentile)", 80, 99, 90)
     min_blob = st.slider("Min blob size (voxels)", 1, 100, 15)
     already_windowed = st.checkbox(
@@ -37,30 +38,47 @@ with st.sidebar:
 if "result" not in st.session_state:
     st.session_state["result"] = None
 
-if run and patient_path and atlas_path and atlas_labels_path:
+if run and patient_path and atlas_dir:
+    atlas_dir_path = Path(atlas_dir)
+    bgl_image = atlas_dir_path / f"BGL_image_{age_group}.nii.gz"
+    bgl_label = atlas_dir_path / f"BGL_label_{age_group}.nii.gz"
+    sgl_image = atlas_dir_path / f"SGL_image_{age_group}.nii.gz"
+    sgl_label = atlas_dir_path / f"SGL_label_{age_group}.nii.gz"
+
     with st.spinner("Preprocessing..."):
         pre = preprocess_volume(patient_path, already_windowed=already_windowed)
     with st.spinner("Detecting ischemic change..."):
         diff_map, change_mask = detect_ischemic_change(
             pre["windowed"], pre["brain_mask"], percentile=percentile, min_blob_voxels=min_blob
         )
-    with st.spinner("Registering atlas (this is the slow step)..."):
-        transform, metric = register_atlas_to_patient(atlas_path, patient_path)
-        region_labels = warp_atlas_labels(atlas_labels_path, patient_path, transform)
-        region_labels = region_labels.transpose(2, 1, 0)
+    with st.spinner("Registering ASPECTS atlas..."):
+        reg = register_aspects_atlas(pre["windowed"], pre["brain_mask"],
+                                      str(bgl_image), str(bgl_label), str(sgl_image), str(sgl_label))
     with st.spinner("Scoring..."):
-        flags = region_flags(change_mask, region_labels)
-        flags = mark_uncertain_near_boundaries(flags, region_labels, change_mask)
+        bg_change_2d = change_mask[:, :, reg["bg_slice_idx"]]
+        sc_change_2d = change_mask[:, :, reg["sc_slice_idx"]]
+
+        bg_flags = region_flags(bg_change_2d, reg["bg_region_labels"])
+        bg_flags = mark_uncertain_near_boundaries(bg_flags, reg["bg_region_labels"], bg_change_2d)
+        sc_flags = region_flags(sc_change_2d, reg["sc_region_labels"])
+        sc_flags = mark_uncertain_near_boundaries(sc_flags, reg["sc_region_labels"], sc_change_2d)
+
+        flags = merge_slice_flags(bg_flags, sc_flags)
         score, flagged_count = compute_aspects_score(flags)
 
     st.session_state["result"] = {
         "windowed": pre["windowed"],
-        "change_mask": change_mask,
-        "region_labels": region_labels,
+        "bg_slice_idx": reg["bg_slice_idx"],
+        "sc_slice_idx": reg["sc_slice_idx"],
+        "bg_change_2d": bg_change_2d,
+        "sc_change_2d": sc_change_2d,
+        "bg_region_labels": reg["bg_region_labels"],
+        "sc_region_labels": reg["sc_region_labels"],
+        "bg_metric": reg["bg_metric"],
+        "sc_metric": reg["sc_metric"],
         "flags": flags,
         "score": score,
         "flagged_count": flagged_count,
-        "metric": metric,
     }
 
 result = st.session_state["result"]
@@ -71,20 +89,28 @@ else:
     col1, col2 = st.columns([2, 1])
 
     with col1:
-        n_slices = result["windowed"].shape[2]
-        slice_idx = st.slider("Slice", 0, n_slices - 1, n_slices // 2)
-        fig = render_slice(
-            result["windowed"][:, :, slice_idx],
-            result["change_mask"][:, :, slice_idx],
-            result["region_labels"][:, :, slice_idx],
-            title=f"Slice {slice_idx}",
+        st.subheader("Basal ganglia level")
+        fig_bg = render_slice(
+            result["windowed"][:, :, result["bg_slice_idx"]],
+            result["bg_change_2d"],
+            result["bg_region_labels"],
+            title=f"BG level (z={result['bg_slice_idx']}, metric={result['bg_metric']:.3f})",
         )
-        st.pyplot(fig)
+        st.pyplot(fig_bg)
+
+        st.subheader("Supraganglionic level")
+        fig_sc = render_slice(
+            result["windowed"][:, :, result["sc_slice_idx"]],
+            result["sc_change_2d"],
+            result["sc_region_labels"],
+            title=f"SC level (z={result['sc_slice_idx']}, metric={result['sc_metric']:.3f})",
+        )
+        st.pyplot(fig_sc)
 
     with col2:
         st.metric("ASPECTS score", f"{result['score']}/10")
         st.caption(f"{result['flagged_count']} region(s) flagged")
-        st.caption(f"Registration metric: {result['metric']:.4f} (calibrate against known cases)")
+        st.caption("Registration metric is a rough confidence proxy — calibrate against known cases.")
         st.subheader("Per-region breakdown")
         for region_id, info in result["flags"].items():
             label = f"{region_id}. {info['name']}"
