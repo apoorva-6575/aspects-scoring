@@ -21,7 +21,9 @@ ASPECTS_REGIONS = {
 }
 
 # A region is flagged if this fraction of its voxels fall inside the
-# detected change mask. Tune against APIS ground truth.
+# detected change mask. Tune against AISD lesion masks (there's no
+# ASPECTS-score ground truth in AISD, only lesion masks, so this can only
+# be calibrated for the detection step, not the final score).
 DEFAULT_FLAG_FRACTION = 0.15
 
 # Below this registration metric quality, mark affected regions "uncertain"

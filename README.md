@@ -14,10 +14,20 @@ image registration (SimpleITK), not a trained network.
 pip install -r requirements.txt
 ```
 
-Download and register for **APIS** (primary dataset), and grab the
-**NCCT ASPECTS atlas** (10 labeled regions) from the resource links on the
-problem statement page. You need three files to run anything:
-- a patient NCCT volume (`.nii.gz`)
+Dataset: **AISD** (397 NCCT scans with DWI-confirmed lesion masks, no
+registration required — https://github.com/GriffinLiang/AISD). APIS would
+have been the primary choice (paired CT-MRI, has cleaner annotations) but
+its registration/access isn't public, so AISD is what this pipeline is
+built against. Note the tradeoff: AISD has lesion masks but no ASPECTS
+region/score labels, so you can validate the Objective 1 detection mask
+(Dice against AISD masks) but the final 0-10 score has no ground truth to
+check against — treat that part as qualitative validation only.
+
+Also grab the **NCCT ASPECTS atlas** (10 labeled regions) — see
+[BravoSun/NCCT-atlas-for-ASPECTS-scoring](https://github.com/BravoSun/NCCT-atlas-for-ASPECTS-scoring)
+or the [MIPLAB-NCCT atlas on Figshare](https://figshare.com/s/9a0ae1773fbf7f46347d).
+You need three files to run anything:
+- a patient NCCT volume (`.nii.gz`) — from AISD
 - the atlas NCCT volume (`.nii.gz`)
 - the atlas region-label volume (`.nii.gz`, integer labels 1-10)
 
@@ -55,7 +65,9 @@ streamlit run app/streamlit_app.py
   roughly axis-aligned. If your dataset has tilted scans, rotate using
   `lr_axis` from `preprocessing.find_midline_axis` first.
 - Threshold/percentile values (`detection.py`, `scoring.py`) are untuned —
-  calibrate against APIS ground truth (see build plan Phase 6).
+  calibrate the detection mask against AISD's lesion masks (Dice score) to
+  pick reasonable defaults (see build plan Phase 6). There's no ground
+  truth for the final ASPECTS score itself, only for the lesion mask.
 - Registration confidence threshold in `scoring.py` is unset — run a few
   known-good vs. known-bad registrations to calibrate it, then use it to
   gate the "uncertain" flag.

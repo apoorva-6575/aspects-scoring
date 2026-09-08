@@ -36,7 +36,7 @@ def threshold_mask(diff_map, brain_mask, percentile=90, min_blob_voxels=15):
     """Threshold the difference map and drop tiny noise blobs.
 
     `percentile` is computed only over brain voxels so it adapts per-scan;
-    tune this and `min_blob_voxels` against APIS ground truth.
+    tune this and `min_blob_voxels` against AISD lesion masks.
     """
     brain_values = diff_map[brain_mask]
     if brain_values.size == 0:
