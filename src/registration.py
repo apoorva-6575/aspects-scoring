@@ -22,12 +22,12 @@ def select_aspects_slices(brain_mask, bg_fraction=0.40, sc_fraction=0.58):
     """Pick the z-slice indices approximating the basal-ganglia level and
     supraganglionic level, as fractions of the brain's z-extent.
 
-    This is a crude placeholder, not real anatomy detection -- clinically,
-    BG level is picked by the thalamus/basal ganglia being visible, and SC
-    level by seeing the lateral ventricle bodies without basal ganglia.
-    Tune bg_fraction/sc_fraction against a handful of AISD volumes with
-    known slice anatomy, or swap in real landmark detection if time
-    allows -- see README known TODOs.
+    This is a crude placeholder, not real anatomy detection -- kept as a
+    cheap fallback for callers that don't want to pay for
+    select_aspects_slices_by_registration's per-candidate registrations.
+    Clinically, BG level is picked by the thalamus/basal ganglia being
+    visible, and SC level by seeing the lateral ventricle bodies without
+    basal ganglia.
     """
     z_indices = np.where(brain_mask.any(axis=(0, 1)))[0]
     if z_indices.size == 0:
@@ -37,6 +37,56 @@ def select_aspects_slices(brain_mask, bg_fraction=0.40, sc_fraction=0.58):
     bg_idx = int(round(z_min + bg_fraction * z_range))
     sc_idx = int(round(z_min + sc_fraction * z_range))
     return bg_idx, sc_idx
+
+
+def _candidate_z_indices(brain_mask, frac_low, frac_high, n_candidates):
+    z_indices = np.where(brain_mask.any(axis=(0, 1)))[0]
+    if z_indices.size == 0:
+        raise ValueError("brain_mask is empty -- check skull stripping")
+    z_min, z_max = int(z_indices.min()), int(z_indices.max())
+    z_range = z_max - z_min
+    fracs = np.linspace(frac_low, frac_high, n_candidates)
+    candidates = sorted({int(round(z_min + f * z_range)) for f in fracs})
+    return candidates
+
+
+def _rigid_metric(patient_slice, atlas_image_path):
+    """Quick rigid-only registration, just to score how well an atlas
+    template matches a candidate slice -- cheaper than the full rigid+
+    affine used for the actual label warp in register_2d.
+    """
+    fixed = _slice_to_sitk(patient_slice)
+    moving = sitk.ReadImage(atlas_image_path, sitk.sitkFloat32)
+    initial = sitk.CenteredTransformInitializer(
+        fixed, moving, sitk.Euler2DTransform(),
+        sitk.CenteredTransformInitializerFilter.GEOMETRY,
+    )
+    reg = sitk.ImageRegistrationMethod()
+    reg.SetMetricAsMattesMutualInformation(numberOfHistogramBins=50)
+    reg.SetOptimizerAsRegularStepGradientDescent(
+        learningRate=1.0, minStep=1e-4, numberOfIterations=100)
+    reg.SetInterpolator(sitk.sitkLinear)
+    reg.SetInitialTransform(initial, inPlace=False)
+    reg.Execute(fixed, moving)
+    return reg.GetMetricValue()
+
+
+def select_slice_by_registration(patient_windowed, brain_mask, atlas_image_path,
+                                  frac_low, frac_high, n_candidates=7):
+    """Pick the z-slice in [frac_low, frac_high] of the brain's z-extent
+    whose rigid registration against `atlas_image_path` scores best (lowest
+    Mattes MI cost). This replaces guessing a single fixed fraction with an
+    actual search using registration quality as the anatomy-matching
+    signal -- still no training, just more registrations.
+    """
+    candidates = _candidate_z_indices(brain_mask, frac_low, frac_high, n_candidates)
+    best_z, best_metric = candidates[0], np.inf
+    for z in candidates:
+        metric = _rigid_metric(patient_windowed[:, :, z], atlas_image_path)
+        if metric < best_metric:
+            best_metric = metric
+            best_z = z
+    return best_z, best_metric
 
 
 def _slice_to_sitk(slice_2d):
@@ -93,12 +143,24 @@ def warp_2d_labels(patient_slice, atlas_label_path, transform):
 def register_aspects_atlas(patient_windowed, brain_mask,
                             bgl_image_path, bgl_label_path,
                             sgl_image_path, sgl_label_path,
-                            bg_fraction=0.40, sc_fraction=0.58):
-    """Full Objective 2 pipeline: pick the BG/SC slices out of the patient
-    volume, register both atlas levels onto them, and return the warped
-    region-label maps plus which patient slice each came from.
+                            bg_frac_range=(0.25, 0.55), sc_frac_range=(0.50, 0.80),
+                            n_slice_candidates=7):
+    """Full Objective 2 pipeline: search for the BG/SC slices out of the
+    patient volume (by registration quality against each atlas template,
+    see select_slice_by_registration), register both atlas levels onto
+    the winners, and return the warped region-label maps plus which
+    patient slice each came from.
+
+    bg_frac_range/sc_frac_range bound the search to plausible bands of the
+    brain's z-extent (BG level lower, SC level higher) rather than
+    searching the whole volume -- widen them if a volume has unusual
+    z-extent (e.g. a limited/cropped FOV).
     """
-    bg_idx, sc_idx = select_aspects_slices(brain_mask, bg_fraction, sc_fraction)
+    bg_idx, bg_search_metric = select_slice_by_registration(
+        patient_windowed, brain_mask, bgl_image_path, *bg_frac_range, n_slice_candidates)
+    sc_idx, sc_search_metric = select_slice_by_registration(
+        patient_windowed, brain_mask, sgl_image_path, *sc_frac_range, n_slice_candidates)
+
     bg_slice = patient_windowed[:, :, bg_idx]
     sc_slice = patient_windowed[:, :, sc_idx]
 

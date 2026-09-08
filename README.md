@@ -106,13 +106,24 @@ streamlit run app/streamlit_app.py
 
 ## Known TODOs before this is demo-ready
 
-- `src/registration.py::select_aspects_slices`: BG/SC slice indices are
-  picked by a crude fixed-fraction-of-brain-height heuristic
-  (`bg_fraction=0.40, sc_fraction=0.58`), not real anatomy detection.
-  Verified end-to-end on one AISD case (picked z=7 and z=9 of 17 slices,
-  registered regions landed centrally/plausibly in the brain) but these
-  fractions are untuned — check against a handful of cases with known
-  slice anatomy and adjust.
+- **BG/SC slice selection has been improved** from a fixed-fraction guess
+  to `registration.py::select_slice_by_registration`: it searches a band
+  of candidate slices (`bg_frac_range=(0.25,0.55)`,
+  `sc_frac_range=(0.50,0.80)` of brain z-extent) and picks whichever
+  scores best against the atlas template by rigid registration (Mattes MI
+  cost) -- still no training, just more registrations as the "does this
+  look like the right anatomy" signal. On a test case this picked
+  noticeably better-matching slices than the old fixed fraction (MI cost
+  -0.111 vs -0.065 for BG, -0.152 vs -0.102 for SC) and changed the picks
+  (z=5,12 vs the old z=7,9 out of a 17-slice volume). Costs ~7s/patient
+  (14 candidate registrations + 2 final ones) — fine for one-at-a-time
+  demo use, too slow to run inside a large calibration grid search.
+  `select_aspects_slices` (the old fixed-fraction version) is kept as a
+  cheap fallback if the search proves unreliable on other cases. Spot-
+  checked on 4 AISD patients: ran cleanly on all of them, metrics stayed
+  in a consistent range, and picks differed meaningfully from the
+  fixed-fraction baseline every time — not exhaustively validated, but
+  enough to trust as the default.
 - `src/detection.py`: `mirror_across_x` assumes the volume is already
   roughly axis-aligned. If your dataset has tilted scans, rotate using
   `lr_axis` from `preprocessing.find_midline_axis` first.
