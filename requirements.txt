@@ -1,0 +1,8 @@
+numpy
+scipy
+nibabel
+pydicom
+SimpleITK
+scikit-image
+matplotlib
+streamlit

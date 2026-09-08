@@ -1,0 +1,9 @@
+data/
+*.nii
+*.nii.gz
+*.dcm
+__pycache__/
+*.pyc
+.venv/
+venv/
+.streamlit/
