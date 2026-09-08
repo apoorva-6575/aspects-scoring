@@ -24,10 +24,14 @@ def main():
     parser.add_argument("--atlas-labels", required=True)
     parser.add_argument("--percentile", type=float, default=90)
     parser.add_argument("--min-blob-voxels", type=int, default=15)
+    parser.add_argument("--already-windowed", action="store_true",
+                        help="Set this for AISD-derived volumes (see "
+                             "scripts/convert_aisd_to_nifti.py) -- their pixels are "
+                             "pre-windowed 0-255 display values, not raw HU.")
     args = parser.parse_args()
 
     print(f"[1/4] Preprocessing {args.patient}")
-    pre = preprocess_volume(args.patient)
+    pre = preprocess_volume(args.patient, already_windowed=args.already_windowed)
 
     print("[2/4] Detecting ischemic change (symmetry difference)")
     diff_map, change_mask = detect_ischemic_change(

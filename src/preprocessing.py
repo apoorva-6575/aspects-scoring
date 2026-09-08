@@ -55,11 +55,27 @@ def find_midline_axis(brain_mask):
     return centroid, lr_axis
 
 
-def preprocess_volume(path, hu_center=40, hu_width=80):
-    """Convenience wrapper for the full Phase 1 pipeline on one file."""
+def preprocess_volume(path, hu_center=40, hu_width=80, already_windowed=False,
+                       ss_low=None, ss_high=None):
+    """Convenience wrapper for the full Phase 1 pipeline on one file.
+
+    `already_windowed=True` is for volumes converted from AISD's PNG slices
+    (see scripts/convert_aisd_to_nifti.py): those are exported as 0-255
+    display-windowed images, not raw Hounsfield units, so applying
+    `window_hu` again would be wrong. In that mode we just rescale to 0-1
+    and use 0-255-scale skull-strip thresholds instead of HU thresholds.
+    """
     raw, affine, img = load_nifti(path)
-    windowed = window_hu(raw, hu_center, hu_width)
-    brain_mask = skull_strip_threshold(raw)
+    if already_windowed:
+        windowed = np.clip(raw, 0, 255) / 255.0
+        low = 20 if ss_low is None else ss_low
+        high = 230 if ss_high is None else ss_high
+    else:
+        windowed = window_hu(raw, hu_center, hu_width)
+        low = 0 if ss_low is None else ss_low
+        high = 100 if ss_high is None else ss_high
+
+    brain_mask = skull_strip_threshold(raw, low, high)
     centroid, lr_axis = find_midline_axis(brain_mask)
     return {
         "raw": raw,

@@ -27,6 +27,11 @@ with st.sidebar:
     atlas_labels_path = st.text_input("Atlas region-labels path (.nii.gz)")
     percentile = st.slider("Detection sensitivity (percentile)", 80, 99, 90)
     min_blob = st.slider("Min blob size (voxels)", 1, 100, 15)
+    already_windowed = st.checkbox(
+        "Pre-windowed source (e.g. AISD-derived volume)",
+        help="Check this for volumes from scripts/convert_aisd_to_nifti.py -- "
+             "their pixels are 0-255 display values, not raw HU.",
+    )
     run = st.button("Run pipeline")
 
 if "result" not in st.session_state:
@@ -34,7 +39,7 @@ if "result" not in st.session_state:
 
 if run and patient_path and atlas_path and atlas_labels_path:
     with st.spinner("Preprocessing..."):
-        pre = preprocess_volume(patient_path)
+        pre = preprocess_volume(patient_path, already_windowed=already_windowed)
     with st.spinner("Detecting ischemic change..."):
         diff_map, change_mask = detect_ischemic_change(
             pre["windowed"], pre["brain_mask"], percentile=percentile, min_blob_voxels=min_blob

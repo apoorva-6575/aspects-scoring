@@ -27,9 +27,35 @@ Also grab the **NCCT ASPECTS atlas** (10 labeled regions) — see
 [BravoSun/NCCT-atlas-for-ASPECTS-scoring](https://github.com/BravoSun/NCCT-atlas-for-ASPECTS-scoring)
 or the [MIPLAB-NCCT atlas on Figshare](https://figshare.com/s/9a0ae1773fbf7f46347d).
 You need three files to run anything:
-- a patient NCCT volume (`.nii.gz`) — from AISD
+- a patient NCCT volume (`.nii.gz`) — from AISD, see conversion step below
 - the atlas NCCT volume (`.nii.gz`)
 - the atlas region-label volume (`.nii.gz`, integer labels 1-10)
+
+### Converting AISD to NIfTI
+
+AISD ships as per-patient folders of 8-bit PNG slices
+(`image/image/<id>/000.png, 001.png, ...`), already brain-windowed for
+display — **not** raw Hounsfield units, and not NIfTI. Convert before
+running the pipeline:
+
+```
+python scripts/convert_aisd_to_nifti.py --aisd-dir data/aisd --out-dir data/aisd_nifti
+```
+
+This writes `image.nii.gz`, `mask_multiclass.nii.gz`, and `mask_binary.nii.gz`
+per patient. The mask has 5 label values (see the script's docstring);
+`mask_binary` combines the CT-visible ones ({1,2,3,5}) and drops label 4
+(infarct visible on DWI but *invisible on CT* — an unfair target for a
+detector that only looks at NCCT). Because these images are pre-windowed,
+not raw HU, load them with `preprocess_volume(path, already_windowed=True)`
+(`src/preprocessing.py`) — passing `already_windowed=False` (the default,
+meant for raw-HU NIfTI like the atlas) on AISD-derived volumes will apply
+the wrong windowing and skull-strip thresholds.
+
+No real voxel spacing is available from the PNGs (that's in AISD's DICOM
+files, not extracted here) — the converter assumes an approximate spacing.
+Fine for running the pipeline and demoing overlays; don't trust it for
+anything requiring true physical distances.
 
 ## Structure
 
