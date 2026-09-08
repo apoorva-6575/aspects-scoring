@@ -45,12 +45,13 @@ def threshold_mask(diff_map, brain_mask, percentile=90, min_blob_voxels=15):
     mask = diff_map >= thresh
 
     labeled, n = ndimage.label(mask)
-    cleaned = np.zeros_like(mask)
-    for i in range(1, n + 1):
-        blob = labeled == i
-        if blob.sum() >= min_blob_voxels:
-            cleaned |= blob
-    return cleaned
+    if n == 0:
+        return mask
+    # Vectorized size filter -- thresholding can produce thousands of tiny
+    # noise blobs, and a per-blob `labeled == i` loop is O(voxels * blobs).
+    sizes = ndimage.sum(mask, labeled, index=np.arange(1, n + 1))
+    keep_labels = np.nonzero(sizes >= min_blob_voxels)[0] + 1
+    return np.isin(labeled, keep_labels)
 
 
 def detect_ischemic_change(volume, brain_mask, center_x=None,
