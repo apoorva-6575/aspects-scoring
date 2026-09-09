@@ -55,9 +55,10 @@ def main():
         if not image_path.exists():
             continue
         pre = preprocess_volume(str(image_path), already_windowed=True)
+        patient_spacing = (abs(pre["affine"][0, 0]), abs(pre["affine"][1, 1]))
         try:
             reg = register_aspects_atlas(
-                pre["windowed"], pre["brain_mask"],
+                pre["windowed"], pre["brain_mask"], patient_spacing,
                 str(bgl_image), str(bgl_label), str(sgl_image), str(sgl_label),
             )
         except Exception as error:

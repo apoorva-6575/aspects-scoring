@@ -46,17 +46,20 @@ def main():
 
     print(f"[1/4] Preprocessing {args.patient}")
     pre = preprocess_volume(args.patient, already_windowed=args.already_windowed)
+    print(f"  detected scan tilt: {pre['rotation_deg']:.1f} deg "
+          f"(symmetry score {pre['rotation_symmetry_score']:.3f})")
 
     print("[2/4] Detecting ischemic change (symmetry difference)")
     diff_map, change_mask = detect_ischemic_change(
-        pre["windowed"], pre["brain_mask"],
+        pre["windowed"], pre["brain_mask"], rotation_deg=pre["rotation_deg"],
         percentile=args.percentile, min_blob_voxels=args.min_blob_voxels,
         erode_iterations=args.erode_iterations,
     )
     print(f"  flagged voxels (whole volume): {change_mask.sum()}")
 
     print(f"[3/4] Registering ASPECTS atlas (age group {args.age_group}) -> patient")
-    reg = register_aspects_atlas(pre["windowed"], pre["brain_mask"],
+    patient_spacing = (abs(pre["affine"][0, 0]), abs(pre["affine"][1, 1]))
+    reg = register_aspects_atlas(pre["windowed"], pre["brain_mask"], patient_spacing,
                                   str(bgl_image), str(bgl_label), str(sgl_image), str(sgl_label))
     print(f"  BG-level slice: z={reg['bg_slice_idx']}  metric={reg['bg_metric']:.4f}")
     print(f"  SC-level slice: z={reg['sc_slice_idx']}  metric={reg['sc_metric']:.4f}")

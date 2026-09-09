@@ -20,28 +20,65 @@ def brain_center_x(brain_mask):
     return np.argwhere(brain_mask)[:, 0].mean()
 
 
-def mirror_across_x(volume, center_x=None, brain_mask=None):
-    """Mirror a volume left-right across a given x index.
-
-    Assumes the volume is already roughly axis-aligned (x = left-right),
-    which holds for most clinical NCCT after standard loading. If scans in
-    your dataset are tilted, rotate to align `lr_axis` from preprocessing
-    with the x-axis before calling this.
+def mirror_across_x(volume, center_x=None, brain_mask=None, rotation_deg=0.0):
+    """Mirror a volume left-right across the brain's true LR symmetry axis.
 
     If `center_x` isn't given, it's derived from `brain_mask` (see
     `brain_center_x`) rather than defaulting to the image's geometric
-    center -- pass `brain_mask` explicitly, don't rely on the old
-    geometric-center fallback.
+    center.
+
+    `rotation_deg` (from preprocessing.find_symmetry_rotation_angle)
+    corrects for a tilted head: the volume is rotated to straighten the LR
+    axis onto the image x-axis, mirrored there, then rotated back -- so the
+    result stays in the original (untilted) coordinate frame and can be
+    diffed directly against the input. rotation_deg=0 (the default) skips
+    all of this and mirrors along x as before, since most scans don't need
+    it and the rotate/mirror/rotate-back path costs more compute.
     """
+    if rotation_deg == 0.0:
+        if center_x is None:
+            center_x = brain_center_x(brain_mask) if brain_mask is not None else (volume.shape[0] - 1) / 2.0
+        flipped = volume[::-1, :, :]
+        shift = 2 * center_x - (volume.shape[0] - 1)
+        return ndimage.shift(flipped, shift=(shift, 0, 0), order=1, mode="nearest")
+
+    # Pad x/y before rotating -- AISD brain masks reach within ~30px of the
+    # 512px edge, and rotating with reshape=False clips content at the
+    # border asymmetrically depending on angle if there's no margin. This
+    # was a real, validated bug (scripts/validate_rotation_correction.py):
+    # without padding, the "corrected" mirror was no better than doing
+    # nothing, because the rotation itself silently mangled the volume.
+    # Right-sized to this specific rotation_deg (not a fixed worst-case
+    # assumption) -- padding a full 3D volume is expensive, and most
+    # rotation_deg values here are well under the +-20 deg search range
+    # find_symmetry_rotation_angle allows.
+    pad = int(max(volume.shape[0], volume.shape[1]) / 2 *
+              np.sin(np.deg2rad(min(abs(rotation_deg), 45.0)))) + 30
+    padded = np.pad(volume, ((pad, pad), (pad, pad), (0, 0)), mode="constant")
+    straightened = ndimage.rotate(padded, angle=-rotation_deg, axes=(0, 1),
+                                   reshape=False, order=1, mode="nearest")
     if center_x is None:
         if brain_mask is None:
-            center_x = (volume.shape[0] - 1) / 2.0
-        else:
-            center_x = brain_center_x(brain_mask)
-    flipped = volume[::-1, :, :]
-    shift = 2 * center_x - (volume.shape[0] - 1)
-    mirrored = ndimage.shift(flipped, shift=(shift, 0, 0), order=1, mode="nearest")
-    return mirrored
+            raise ValueError("rotation_deg given but no brain_mask/center_x to find the straightened mirror axis")
+        # Recompute the mirror center in the straightened frame -- rotating
+        # the volume moves where the brain centroid's x-coordinate is, so
+        # reusing the un-rotated center_x here would mirror around the wrong
+        # column. Rotate the mask itself (cheap, boolean) rather than
+        # hand-deriving the transformed point, to avoid a sign/convention bug.
+        padded_mask = np.pad(brain_mask, ((pad, pad), (pad, pad), (0, 0)), mode="constant")
+        straightened_mask = ndimage.rotate(padded_mask.astype(np.float32), angle=-rotation_deg,
+                                           axes=(0, 1), reshape=False, order=0,
+                                           mode="constant", cval=0) > 0.5
+        center_x = brain_center_x(straightened_mask)
+    else:
+        center_x = center_x + pad
+
+    flipped = straightened[::-1, :, :]
+    shift = 2 * center_x - (straightened.shape[0] - 1)
+    mirrored_straight = ndimage.shift(flipped, shift=(shift, 0, 0), order=1, mode="nearest")
+    mirrored_padded = ndimage.rotate(mirrored_straight, angle=rotation_deg, axes=(0, 1),
+                                     reshape=False, order=1, mode="nearest")
+    return mirrored_padded[pad:pad + volume.shape[0], pad:pad + volume.shape[1], :]
 
 
 def difference_map(volume, mirrored, brain_mask):
@@ -73,7 +110,7 @@ def threshold_mask(diff_map, brain_mask, percentile=90, min_blob_voxels=15):
     return np.isin(labeled, keep_labels)
 
 
-def detect_ischemic_change(volume, brain_mask, center_x=None,
+def detect_ischemic_change(volume, brain_mask, center_x=None, rotation_deg=0.0,
                             percentile=70, min_blob_voxels=80, erode_iterations=3):
     """Full Phase 2 pipeline: returns (diff_map, change_mask).
 
@@ -88,10 +125,15 @@ def detect_ischemic_change(volume, brain_mask, center_x=None,
     which otherwise dominates the percentile threshold with asymmetric
     edge noise unrelated to any real lesion -- this alone roughly doubled
     Dice in testing.
+
+    `rotation_deg` corrects for a tilted scan (pass
+    preprocessing.find_symmetry_rotation_angle's result) -- defaults to 0
+    (no correction) since most AISD volumes don't need it and the search +
+    rotate/mirror/rotate-back path costs extra compute.
     """
     eroded_mask = (ndimage.binary_erosion(brain_mask, iterations=erode_iterations)
                    if erode_iterations > 0 else brain_mask)
-    mirrored = mirror_across_x(volume, center_x, brain_mask=brain_mask)
+    mirrored = mirror_across_x(volume, center_x, brain_mask=brain_mask, rotation_deg=rotation_deg)
     diff = difference_map(volume, mirrored, eroded_mask)
     mask = threshold_mask(diff, eroded_mask, percentile, min_blob_voxels)
     return diff, mask

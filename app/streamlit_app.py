@@ -57,11 +57,12 @@ if run and patient_path and atlas_dir:
         pre = preprocess_volume(patient_path, already_windowed=already_windowed)
     with st.spinner("Detecting ischemic change..."):
         diff_map, change_mask = detect_ischemic_change(
-            pre["windowed"], pre["brain_mask"], percentile=percentile,
-            min_blob_voxels=min_blob, erode_iterations=erode_iterations,
+            pre["windowed"], pre["brain_mask"], rotation_deg=pre["rotation_deg"],
+            percentile=percentile, min_blob_voxels=min_blob, erode_iterations=erode_iterations,
         )
     with st.spinner("Registering ASPECTS atlas..."):
-        reg = register_aspects_atlas(pre["windowed"], pre["brain_mask"],
+        patient_spacing = (abs(pre["affine"][0, 0]), abs(pre["affine"][1, 1]))
+        reg = register_aspects_atlas(pre["windowed"], pre["brain_mask"], patient_spacing,
                                       str(bgl_image), str(bgl_label), str(sgl_image), str(sgl_label))
     with st.spinner("Scoring..."):
         bg_change_2d = change_mask[:, :, reg["bg_slice_idx"]]
@@ -87,6 +88,7 @@ if run and patient_path and atlas_dir:
         "sc_region_labels": reg["sc_region_labels"],
         "bg_metric": reg["bg_metric"],
         "sc_metric": reg["sc_metric"],
+        "rotation_deg": pre["rotation_deg"],
         "flags": flags,
         "score": score,
         "flagged_count": flagged_count,
@@ -121,6 +123,8 @@ else:
     with col2:
         st.metric("ASPECTS score", f"{result['score']}/10")
         st.caption(f"{result['flagged_count']} region(s) flagged")
+        st.caption(f"Detected scan tilt: {result['rotation_deg']:.1f}° "
+                   "(corrected for automatically before mirroring)")
         st.caption("A slice with the worst-quartile registration metric (seen across 40 "
                    "calibration patients) is marked low-confidence below — a distribution-based "
                    "default, not validated accuracy.")

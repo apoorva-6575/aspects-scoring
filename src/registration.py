@@ -12,6 +12,21 @@ registration here is per-slice, not per-volume.
 
 No training -- classical optimization-based registration via SimpleITK,
 same as a 3D approach would use, just applied in 2D.
+
+IMPORTANT -- patient_spacing: every entry point here takes the patient
+volume's real (x, y) voxel spacing in mm (from the NIfTI affine, e.g.
+`pre["affine"]`). Without it, patient slices get converted to SimpleITK
+images at the default 1.0mm/px, while the atlas carries its own real
+spacing (0.5mm/px, ~230mm across) -- so SimpleITK would believe the
+patient's head is ~512mm across, a ~2.2x scale mismatch a *rigid*
+transform (rotation+translation only, no scaling) cannot compensate for.
+This was found and confirmed as the actual root cause of a real bug: every
+registration attempted before this fix converged to a "confident-looking"
+(good Mattes MI score) but anatomically nonsensical transform -- rotation
+angles like 147.5 degrees, and region labels landing with zero voxel
+overlap against AISD ground-truth lesions in every one of 4 patients
+checked. See scripts/validate_rotation_correction.py-adjacent debugging
+notes in the project history; this is not a theoretical concern.
 """
 
 import numpy as np
@@ -50,12 +65,20 @@ def _candidate_z_indices(brain_mask, frac_low, frac_high, n_candidates):
     return candidates
 
 
-def _rigid_metric(patient_slice, atlas_image_path):
+def _slice_to_sitk(slice_2d, spacing):
+    # slice_2d is (x, y) per this codebase's convention; sitk.GetImageFromArray
+    # treats the first numpy axis as rows, so transpose to keep axes aligned.
+    img = sitk.GetImageFromArray(slice_2d.T.astype(np.float32))
+    img.SetSpacing((float(spacing[0]), float(spacing[1])))
+    return img
+
+
+def _rigid_metric(patient_slice, atlas_image_path, patient_spacing):
     """Quick rigid-only registration, just to score how well an atlas
     template matches a candidate slice -- cheaper than the full rigid+
     affine used for the actual label warp in register_2d.
     """
-    fixed = _slice_to_sitk(patient_slice)
+    fixed = _slice_to_sitk(patient_slice, patient_spacing)
     moving = sitk.ReadImage(atlas_image_path, sitk.sitkFloat32)
     initial = sitk.CenteredTransformInitializer(
         fixed, moving, sitk.Euler2DTransform(),
@@ -65,6 +88,7 @@ def _rigid_metric(patient_slice, atlas_image_path):
     reg.SetMetricAsMattesMutualInformation(numberOfHistogramBins=50)
     reg.SetOptimizerAsRegularStepGradientDescent(
         learningRate=1.0, minStep=1e-4, numberOfIterations=100)
+    reg.SetOptimizerScalesFromPhysicalShift()  # see register_2d for why this matters
     reg.SetInterpolator(sitk.sitkLinear)
     reg.SetInitialTransform(initial, inPlace=False)
     reg.Execute(fixed, moving)
@@ -72,7 +96,7 @@ def _rigid_metric(patient_slice, atlas_image_path):
 
 
 def select_slice_by_registration(patient_windowed, brain_mask, atlas_image_path,
-                                  frac_low, frac_high, n_candidates=7):
+                                  patient_spacing, frac_low, frac_high, n_candidates=7):
     """Pick the z-slice in [frac_low, frac_high] of the brain's z-extent
     whose rigid registration against `atlas_image_path` scores best (lowest
     Mattes MI cost). This replaces guessing a single fixed fraction with an
@@ -82,45 +106,75 @@ def select_slice_by_registration(patient_windowed, brain_mask, atlas_image_path,
     candidates = _candidate_z_indices(brain_mask, frac_low, frac_high, n_candidates)
     best_z, best_metric = candidates[0], np.inf
     for z in candidates:
-        metric = _rigid_metric(patient_windowed[:, :, z], atlas_image_path)
+        metric = _rigid_metric(patient_windowed[:, :, z], atlas_image_path, patient_spacing)
         if metric < best_metric:
             best_metric = metric
             best_z = z
     return best_z, best_metric
 
 
-def _slice_to_sitk(slice_2d):
-    # slice_2d is (x, y) per this codebase's convention; sitk.GetImageFromArray
-    # treats the first numpy axis as rows, so transpose to keep axes aligned.
-    return sitk.GetImageFromArray(slice_2d.T.astype(np.float32))
+def _run_rigid(fixed, moving, initial_angle_rad):
+    """One rigid registration run seeded at a given initial rotation."""
+    initial = sitk.CenteredTransformInitializer(
+        fixed, moving, sitk.Euler2DTransform(),
+        sitk.CenteredTransformInitializerFilter.GEOMETRY,
+    )
+    initial.SetAngle(initial_angle_rad)
+    rigid_reg = sitk.ImageRegistrationMethod()
+    rigid_reg.SetMetricAsMattesMutualInformation(numberOfHistogramBins=50)
+    rigid_reg.SetOptimizerAsRegularStepGradientDescent(
+        learningRate=1.0, minStep=1e-4, numberOfIterations=200)
+    # Without this, rotation (radians) and translation (pixels) share one
+    # learning rate despite being on totally different scales -- the
+    # optimizer can take a wildly oversized step in angle relative to
+    # translation and diverge into a nonsense local optimum.
+    # SetOptimizerScalesFromPhysicalShift rescales each parameter's step by
+    # how much it actually moves the image in physical space, the standard
+    # SimpleITK fix for this.
+    rigid_reg.SetOptimizerScalesFromPhysicalShift()
+    rigid_reg.SetInterpolator(sitk.sitkLinear)
+    rigid_reg.SetInitialTransform(initial, inPlace=False)
+    transform = rigid_reg.Execute(fixed, moving)
+    return transform, rigid_reg.GetMetricValue()
 
 
-def register_2d(patient_slice, atlas_image_path):
+def register_2d(patient_slice, atlas_image_path, patient_spacing):
     """Rigid -> affine registration of a 2D atlas image onto a 2D patient
     slice. Returns (transform, metric_value) -- metric is a rough proxy
     for registration confidence (lower Mattes MI cost is usually better;
     calibrate a threshold empirically, don't trust the raw number blindly).
     """
-    fixed = _slice_to_sitk(patient_slice)
+    fixed = _slice_to_sitk(patient_slice, patient_spacing)
     moving = sitk.ReadImage(atlas_image_path, sitk.sitkFloat32)
 
-    initial = sitk.CenteredTransformInitializer(
-        fixed, moving, sitk.Euler2DTransform(),
-        sitk.CenteredTransformInitializerFilter.GEOMETRY,
-    )
-    rigid_reg = sitk.ImageRegistrationMethod()
-    rigid_reg.SetMetricAsMattesMutualInformation(numberOfHistogramBins=50)
-    rigid_reg.SetOptimizerAsRegularStepGradientDescent(
-        learningRate=1.0, minStep=1e-4, numberOfIterations=200)
-    rigid_reg.SetInterpolator(sitk.sitkLinear)
-    rigid_reg.SetInitialTransform(initial, inPlace=False)
-    rigid_transform = rigid_reg.Execute(fixed, moving)
+    # Multi-start rigid stage: a single gradient-descent run from angle=0
+    # can converge to a garbage local optimum, because a roughly oval brain
+    # shape looks similar to Mattes MI under large spurious rotations. Try
+    # several candidate starting angles and keep whichever actually
+    # converges to the best final metric -- the same "search a small grid
+    # instead of trusting one gradient descent" fix already validated for
+    # find_symmetry_rotation_angle.
+    best_transform, best_metric = None, np.inf
+    for angle_deg in (0, 45, 90, 135, 180, -45, -90, -135):
+        transform, metric = _run_rigid(fixed, moving, np.deg2rad(angle_deg))
+        if metric < best_metric:
+            best_transform, best_metric = transform, metric
+    rigid_transform = best_transform
 
     affine_reg = sitk.ImageRegistrationMethod()
     affine_reg.SetMetricAsMattesMutualInformation(numberOfHistogramBins=50)
     affine_reg.SetOptimizerAsRegularStepGradientDescent(
         learningRate=1.0, minStep=1e-4, numberOfIterations=200)
+    affine_reg.SetOptimizerScalesFromPhysicalShift()
     affine_reg.SetInterpolator(sitk.sitkLinear)
+    # NOTE: this "affine" stage actually continues optimizing the same
+    # Euler2DTransform (rigid: rotation + translation only) from `initial`
+    # -- SetInitialTransform doesn't change the transform TYPE, so passing
+    # a rigid_transform here does not add scaling/shearing degrees of
+    # freedom despite the function's rigid->affine framing. Left as a
+    # second rigid refinement pass for now; a true affine stage would need
+    # SetInitialTransform(sitk.AffineTransform(2)) seeded from
+    # rigid_transform's parameters.
     affine_reg.SetInitialTransform(rigid_transform, inPlace=False)
     affine_transform = affine_reg.Execute(fixed, moving)
     metric_value = affine_reg.GetMetricValue()
@@ -128,19 +182,19 @@ def register_2d(patient_slice, atlas_image_path):
     return affine_transform, metric_value
 
 
-def warp_2d_labels(patient_slice, atlas_label_path, transform):
+def warp_2d_labels(patient_slice, atlas_label_path, transform, patient_spacing):
     """Warp a 2D atlas label image onto the patient slice grid (nearest
     neighbor, to keep integer labels intact). Returns an (x, y) array
     matching `patient_slice`'s shape/orientation.
     """
-    fixed = _slice_to_sitk(patient_slice)
+    fixed = _slice_to_sitk(patient_slice, patient_spacing)
     labels = sitk.ReadImage(atlas_label_path, sitk.sitkUInt8)
     warped = sitk.Resample(labels, fixed, transform, sitk.sitkNearestNeighbor,
                            0, labels.GetPixelID())
     return sitk.GetArrayFromImage(warped).T
 
 
-def register_aspects_atlas(patient_windowed, brain_mask,
+def register_aspects_atlas(patient_windowed, brain_mask, patient_spacing,
                             bgl_image_path, bgl_label_path,
                             sgl_image_path, sgl_label_path,
                             bg_frac_range=(0.25, 0.55), sc_frac_range=(0.50, 0.80),
@@ -151,24 +205,28 @@ def register_aspects_atlas(patient_windowed, brain_mask,
     the winners, and return the warped region-label maps plus which
     patient slice each came from.
 
+    `patient_spacing` is the patient volume's (x, y) voxel spacing in mm
+    (e.g. derived from `pre["affine"]`) -- required to avoid a scale
+    mismatch against the atlas's own real spacing, see module docstring.
+
     bg_frac_range/sc_frac_range bound the search to plausible bands of the
     brain's z-extent (BG level lower, SC level higher) rather than
     searching the whole volume -- widen them if a volume has unusual
     z-extent (e.g. a limited/cropped FOV).
     """
     bg_idx, bg_search_metric = select_slice_by_registration(
-        patient_windowed, brain_mask, bgl_image_path, *bg_frac_range, n_slice_candidates)
+        patient_windowed, brain_mask, bgl_image_path, patient_spacing, *bg_frac_range, n_slice_candidates)
     sc_idx, sc_search_metric = select_slice_by_registration(
-        patient_windowed, brain_mask, sgl_image_path, *sc_frac_range, n_slice_candidates)
+        patient_windowed, brain_mask, sgl_image_path, patient_spacing, *sc_frac_range, n_slice_candidates)
 
     bg_slice = patient_windowed[:, :, bg_idx]
     sc_slice = patient_windowed[:, :, sc_idx]
 
-    bg_transform, bg_metric = register_2d(bg_slice, bgl_image_path)
-    bg_region_labels = warp_2d_labels(bg_slice, bgl_label_path, bg_transform)
+    bg_transform, bg_metric = register_2d(bg_slice, bgl_image_path, patient_spacing)
+    bg_region_labels = warp_2d_labels(bg_slice, bgl_label_path, bg_transform, patient_spacing)
 
-    sc_transform, sc_metric = register_2d(sc_slice, sgl_image_path)
-    sc_region_labels = warp_2d_labels(sc_slice, sgl_label_path, sc_transform)
+    sc_transform, sc_metric = register_2d(sc_slice, sgl_image_path, patient_spacing)
+    sc_region_labels = warp_2d_labels(sc_slice, sgl_label_path, sc_transform, patient_spacing)
 
     return {
         "bg_slice_idx": bg_idx,

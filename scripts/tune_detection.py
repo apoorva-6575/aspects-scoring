@@ -59,7 +59,8 @@ def main():
         if gt.sum() == 0:
             continue
         pre = preprocess_volume(str(pdir / "image.nii.gz"), already_windowed=True)
-        mirrored = mirror_across_x(pre["windowed"], brain_mask=pre["brain_mask"])
+        mirrored = mirror_across_x(pre["windowed"], brain_mask=pre["brain_mask"],
+                                    rotation_deg=pre["rotation_deg"])
 
         for e in erode_options:
             eroded_mask = (ndimage.binary_erosion(pre["brain_mask"], iterations=e)
